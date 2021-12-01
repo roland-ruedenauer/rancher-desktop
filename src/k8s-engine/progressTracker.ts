@@ -5,9 +5,11 @@ import * as K8s from './k8s';
  */
 export default class ProgressTracker {
   /**
+   * @param backend The backend owner, used to set the current command description
    * @param notify The callback to invoke on progress change.
    */
-  constructor(notify: (progress: K8s.KubernetesProgress) => void) {
+  constructor(backend: K8s.KubernetesBackend, notify: (progress: K8s.KubernetesProgress) => void) {
+    this.backend = backend;
     this.notify = notify;
   }
 
@@ -40,6 +42,9 @@ export default class ProgressTracker {
   action<T>(description: string, priority: number, v: Promise<T> | (() => Promise<T>)) {
     const id = this.nextActionID;
 
+    if (this.backend) {
+      this.backend.lastCommandComment = description;
+    }
     this.nextActionID++;
     this.actionProgress.push({
       priority,
@@ -66,6 +71,7 @@ export default class ProgressTracker {
   }
 
   protected notify: (progress: K8s.KubernetesProgress) => void;
+  protected backend: K8s.KubernetesBackend|undefined;
 
   /**
    * The last set numeric progress.

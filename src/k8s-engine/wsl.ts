@@ -169,14 +169,19 @@ export default class WSLBackend extends events.EventEmitter implements K8s.Kuber
     this.k3sHelper.initialize().catch((err) => {
       console.log('k3sHelper.initialize failed: ', err);
     });
-    this.progressTracker = new ProgressTracker((progress) => {
+    this.progressTracker = new ProgressTracker(this, (progress) => {
       this.progress = progress;
       this.emit('progress');
     });
-    this.mobySocketProxyProcess = new BackgroundProcess(this, 'Win32 socket proxy', async() => {
+    const commandArgs = ['docker-proxy', 'serve'];
+    const backgroundProcessLabel = 'Win32 socket proxy';
+
+    this.#lastCommand = `wsl-helper ${ commandArgs.join(' ') }`;
+    this.#lastCommandComment = 'Starting up #{ backgroundProcessLabel } background process';
+    this.mobySocketProxyProcess = new BackgroundProcess(this, backgroundProcessLabel, async() => {
       const exe = resources.get('win32', 'bin', 'wsl-helper.exe');
 
-      return childProcess.spawn(exe, ['docker-proxy', 'serve'], {
+      return childProcess.spawn(exe, commandArgs, {
         stdio:       ['ignore', await Logging.wsl.fdStream, await Logging.wsl.fdStream],
         windowsHide: true,
       });
@@ -227,6 +232,22 @@ export default class WSLBackend extends events.EventEmitter implements K8s.Kuber
 
   /** The port Kubernetes should listen on; this may not match reality if Kubernetes isn't up. */
   #desiredPort = 6443;
+
+  /** Used for giving better error messages on failure to start or stop
+   * The actual underlying lima command
+   */
+  #lastCommand = '';
+
+  /** An explanation of the last run command */
+  #lastCommandComment = '';
+
+  get lastCommandComment() {
+    return this.#lastCommandComment;
+  }
+
+  set lastCommandComment(value: string) {
+    this.#lastCommandComment = value;
+  }
 
   /** Helper object to manage available K3s versions. */
   protected k3sHelper = new K3sHelper('x86_64');
@@ -1282,5 +1303,17 @@ export default class WSLBackend extends events.EventEmitter implements K8s.Kuber
       return `Error setting up integration`;
     }
     console.log(`kubeconfig integration for ${ distro } set to ${ state }`);
+  }
+
+  async getFailureDetails(): Promise<K8s.FailureDetails> {
+    const logfile = path.join(paths.logs, 'wsl.log');
+    const loglines = (await fs.promises.readFile(logfile, 'utf-8')).split('\n').slice(-10);
+    const details: K8s.FailureDetails = {
+      lastCommand:        this.#lastCommand,
+      lastCommandComment: this.#lastCommandComment,
+      lastLogLines:       loglines,
+    };
+
+    return details;
   }
 }

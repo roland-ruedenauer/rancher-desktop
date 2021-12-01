@@ -23,7 +23,6 @@ import setupUpdate from '@/main/update';
 import setupTray from '@/main/tray';
 import setupPaths from '@/main/paths';
 import buildApplicationMenu from '@/main/mainmenu';
-import { ContainerEngine } from '@/config/settings';
 
 Electron.app.setName('Rancher Desktop');
 
@@ -615,6 +614,29 @@ function handleFailure(payload: any) {
   }
   console.log(`Kubernetes was unable to start:`, payload);
   (async() => {
+    try {
+      const failureDetails = await k8smanager.getFailureDetails();
+
+      if (failureDetails) {
+        const ptn = /^\s*There was an unknown error starting Kubernetes:\s*(.*)/;
+        const m = ptn.exec(message);
+
+        if (m) {
+          message = m[1];
+        }
+        if (failureDetails.lastCommand) {
+          message += `\nLast command: ${ failureDetails.lastCommand }`;
+        }
+        if (failureDetails.lastCommandComment) {
+          message += `\nDescription: ${ failureDetails.lastCommandComment }`;
+        }
+        if (failureDetails.lastLogLines) {
+          console.log(`\n${ failureDetails.lastLogLines.join('\n') }`);
+          message += `\nLast Log Lines: ${ failureDetails.lastLogLines.join('\n') }`;
+        }
+      }
+    } catch {
+    }
     await Electron.dialog.showErrorBox(titlePart, message);
     if (payload instanceof K8s.KubernetesError && payload.fatal) {
       process.exit(0);

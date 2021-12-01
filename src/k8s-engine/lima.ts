@@ -136,7 +136,7 @@ export default class LimaBackend extends events.EventEmitter implements K8s.Kube
       console.log('k3sHelper.initialize failed: ', err);
     });
 
-    this.progressTracker = new ProgressTracker((progress) => {
+    this.progressTracker = new ProgressTracker(this, (progress) => {
       this.progress = progress;
       this.emit('progress');
     });
@@ -170,6 +170,22 @@ export default class LimaBackend extends events.EventEmitter implements K8s.Kube
 
   /** The name of the shared lima interface from the config file */
   #externalInterfaceName = '';
+
+  /** Used for giving better error messages on failure to start or stop
+   * The actual underlying lima command
+   */
+  #lastCommand = '';
+
+  /** An explanation of the last run command */
+  #lastCommandComment = '';
+
+  get lastCommandComment() {
+    return this.#lastCommandComment;
+  }
+
+  set lastCommandComment(value: string) {
+    this.#lastCommandComment = value;
+  }
 
   /** Helper object to manage available K3s versions. */
   protected readonly k3sHelper: K3sHelper;
@@ -544,6 +560,7 @@ export default class LimaBackend extends events.EventEmitter implements K8s.Kube
   }
 
   protected async lima(...args: string[]): Promise<void> {
+    this.#lastCommand = `limactl ${ args.join(' ') }`;
     try {
       await childProcess.spawnFile(this.limactl, args,
         { env: this.limaEnv, stdio: console });
@@ -555,6 +572,7 @@ export default class LimaBackend extends events.EventEmitter implements K8s.Kube
   }
 
   protected async limaWithCapture(...args: string[]): Promise<string> {
+    this.#lastCommand = `limactl ${ args.join(' ') }`;
     const { stdout } = await childProcess.spawnFile(this.limactl, args,
       { env: this.limaEnv, stdio: ['ignore', 'pipe', console] });
 
@@ -563,6 +581,7 @@ export default class LimaBackend extends events.EventEmitter implements K8s.Kube
 
   limaSpawn(args: string[]): ChildProcess {
     args = ['shell', '--workdir=.', MACHINE_NAME].concat(args);
+    this.#lastCommand = `limactl ${ args.join(' ') }`;
 
     return spawnWithSignal(this.limactl, args, { env: this.limaEnv });
   }
@@ -1060,6 +1079,7 @@ ${ commands.join('\n') }
     const desiredVersion = await this.desiredVersion;
     const previousVersion = (await this.currentConfig)?.k3s?.version;
     const isDowngrade = previousVersion ? semver.gt(previousVersion, desiredVersion) : false;
+    let commandArgs: Array<string>;
 
     this.#desiredPort = config.port;
     this.setState(K8s.State.STARTING);
@@ -1160,9 +1180,10 @@ ${ commands.join('\n') }
                 // User aborted
                 return;
               }
+              commandArgs = ['shell', '--workdir=.', MACHINE_NAME, 'ls', '/etc/rancher/k3s/k3s.yaml'];
+              this.#lastCommand = commandArgs.join(' ');
               try {
-                await childProcess.spawnFile(this.limactl,
-                  ['shell', '--workdir=.', MACHINE_NAME, 'ls', '/etc/rancher/k3s/k3s.yaml'],
+                await childProcess.spawnFile(this.limactl, commandArgs,
                   { env: this.limaEnv, stdio: 'ignore' });
                 break;
               } catch (ex) {
@@ -1173,11 +1194,14 @@ ${ commands.join('\n') }
             console.debug('/etc/rancher/k3s/k3s.yaml is ready.');
           }
         );
+        commandArgs = ['shell', '--workdir=.', MACHINE_NAME, 'sudo', 'cat', '/etc/rancher/k3s/k3s.yaml'];
+        this.#lastCommand = commandArgs.join(' ');
         await this.progressTracker.action(
           'Updating kubeconfig',
           50,
           this.k3sHelper.updateKubeconfig(
-            () => this.limaWithCapture('shell', '--workdir=.', MACHINE_NAME, 'sudo', 'cat', '/etc/rancher/k3s/k3s.yaml')));
+            () => this.limaWithCapture(...commandArgs)));
+
         await this.progressTracker.action(
           'Waiting for services',
           50,
@@ -1196,8 +1220,11 @@ ${ commands.join('\n') }
         // Trigger kuberlr to ensure there's a compatible version of kubectl in place for the users
         // rancher-desktop mostly uses the K8s API instead of kubectl, so we need to invoke kubectl
         // to nudge kuberlr
+
+        commandArgs = ['--context', 'rancher-desktop', 'cluster-info'];
+        this.#lastCommand = `${ resources.executable('kubectl') } ${ commandArgs.join(' ') }`;
         await childProcess.spawnFile(resources.executable('kubectl'),
-          ['--context', 'rancher-desktop', 'cluster-info'],
+          commandArgs,
           { stdio: Logging.k8s });
 
         await this.progressTracker.action(
@@ -1387,5 +1414,17 @@ ${ commands.join('\n') }
 
   async setIntegration(linkPath: string, state: boolean): Promise<string | undefined> {
     return await this.unixlikeIntegrations.setIntegration(linkPath, state);
+  }
+
+  async getFailureDetails(): Promise<K8s.FailureDetails> {
+    const logfile = path.join(paths.logs, 'lima.log');
+    const loglines = (await fs.promises.readFile(logfile, 'utf-8')).split('\n').slice(-10);
+    const details: K8s.FailureDetails = {
+      lastCommand:        this.#lastCommand,
+      lastCommandComment: this.#lastCommandComment,
+      lastLogLines:       loglines,
+    };
+
+    return details;
   }
 }
